@@ -20,19 +20,27 @@ import (
 )
 
 type DriveManager struct {
-	service  *drive.Service
-	folderID string
+	readService   *drive.Service // Service Account для чтения
+	uploadService *drive.Service // OAuth2 для загрузки
+	folderID      string
 }
 
 type UploadSession struct {
-	chatID        int64
-	isActive      bool
-	uploadCount   int
-	startTime     time.Time
-	authenticated bool
+	chatID      int64
+	isActive    bool
+	uploadCount int
+	startTime   time.Time
 }
 
 var uploadSessions = make(map[int64]*UploadSession)
+var isFirstTimeSetup = true
+
+func init() {
+	// Проверяем, был ли уже введен пароль ранее
+	if _, err := os.Stat("password_entered.flag"); err == nil {
+		isFirstTimeSetup = false
+	}
+}
 
 func main() {
 	godotenv.Load()
@@ -80,16 +88,19 @@ func main() {
 	b.Handle("/upload", func(c tele.Context) error {
 		chatID := c.Chat().ID
 
-		// Start new upload session (not authenticated yet)
+		// Start new upload session
 		uploadSessions[chatID] = &UploadSession{
-			chatID:        chatID,
-			isActive:      true,
-			uploadCount:   0,
-			startTime:     time.Now(),
-			authenticated: false,
+			chatID:      chatID,
+			isActive:    true,
+			uploadCount: 0,
+			startTime:   time.Now(),
 		}
 
-		return c.Send("� Please enter the upload password to continue:")
+		if isFirstTimeSetup {
+			return c.Send("🔑 Please enter the upload password to continue:")
+		} else {
+			return c.Send("✅ Upload session started!\n\nPlease send your .jar files now. I'll upload each one to Google Drive.\n\nUse /done when you're finished uploading, or /cancel to cancel the session.")
+		}
 	})
 
 	// Done command - ends upload session
@@ -136,7 +147,7 @@ func main() {
 		}
 
 		// Check if authenticated
-		if !session.authenticated {
+		if isFirstTimeSetup {
 			return c.Send("🔒 Please authenticate first with the password. Use /upload and enter the password.")
 		}
 
@@ -175,8 +186,8 @@ func main() {
 		session, exists := uploadSessions[chatID]
 
 		// Check if there's an active upload session waiting for password
-		if !exists || !session.isActive || session.authenticated {
-			return nil // Ignore text messages if no session or already authenticated
+		if !exists || !session.isActive || !isFirstTimeSetup {
+			return nil // Ignore text messages if no session or password already entered
 		}
 
 		uploadPassword := os.Getenv("upload_password")
@@ -186,7 +197,13 @@ func main() {
 
 		// Check password
 		if c.Text() == uploadPassword {
-			session.authenticated = true
+			// Создаем флаг, что пароль введен
+			file, err := os.Create("password_entered.flag")
+			if err == nil {
+				file.Close()
+			}
+			isFirstTimeSetup = false
+
 			return c.Send("✅ UBERIIIIIIIIIIIIIIII\n\n📤 Upload session started!\n\nPlease send your .jar files now. I'll upload each one to Google Drive.\n\nUse /done when you're finished uploading, or /cancel to cancel the session.")
 		} else {
 			// Wrong password - end session
@@ -232,31 +249,65 @@ func main() {
 func initGoogleDrive() (*DriveManager, error) {
 	ctx := context.Background()
 
-	// Read credentials from environment or file
-	credentialsPath := os.Getenv("GOOGLE_CREDENTIALS_PATH")
-	if credentialsPath == "" {
-		credentialsPath = "credentials.json"
+	// Инициализация OAuth2 для загрузки (ОБЯЗАТЕЛЬНО)
+	oauthCredentialsPath := os.Getenv("OAUTH_CREDENTIALS_PATH")
+	if oauthCredentialsPath == "" {
+		oauthCredentialsPath = "credentials.json"
 	}
 
-	b, err := os.ReadFile(credentialsPath)
+	b, err := os.ReadFile(oauthCredentialsPath)
 	if err != nil {
-		return nil, fmt.Errorf("unable to read client secret file: %v", err)
+		return nil, fmt.Errorf("unable to read oauth credentials: %v", err)
 	}
 
 	config, err := google.ConfigFromJSON(b, drive.DriveFileScope)
 	if err != nil {
-		return nil, fmt.Errorf("unable to parse client secret file to config: %v", err)
+		return nil, fmt.Errorf("unable to parse oauth credentials: %v", err)
 	}
 
 	client := getClient(config)
-
-	srv, err := drive.NewService(ctx, option.WithHTTPClient(client))
+	uploadService, err := drive.NewService(ctx, option.WithHTTPClient(client))
 	if err != nil {
-		return nil, fmt.Errorf("unable to retrieve Drive client: %v", err)
+		return nil, fmt.Errorf("unable to create upload service: %v", err)
 	}
 
-	// Create or get the mods folder
-	folderID := os.Getenv("folder_id") // Optional: specify exact folder ID
+	// Инициализация Service Account для чтения (ОПЦИОНАЛЬНО)
+	var readService *drive.Service
+	serviceCredentialsPath := os.Getenv("SERVICE_CREDENTIALS_PATH")
+	if serviceCredentialsPath == "" {
+		serviceCredentialsPath = "service_credentials.json"
+	}
+
+	// Проверяем, существует ли файл Service Account
+	if _, err := os.Stat(serviceCredentialsPath); err == nil {
+		// Читаем Service Account credentials
+		serviceCredBytes, err := os.ReadFile(serviceCredentialsPath)
+		if err != nil {
+			fmt.Printf("Warning: Failed to read Service Account credentials, using OAuth2 for reading: %v\n", err)
+			readService = uploadService
+		} else {
+			// Создаем Service Account конфигурацию
+			serviceConfig, err := google.JWTConfigFromJSON(serviceCredBytes, drive.DriveReadonlyScope)
+			if err != nil {
+				fmt.Printf("Warning: Failed to parse Service Account credentials, using OAuth2 for reading: %v\n", err)
+				readService = uploadService
+			} else {
+				readService, err = drive.NewService(ctx, option.WithHTTPClient(serviceConfig.Client(ctx)))
+				if err != nil {
+					fmt.Printf("Warning: Failed to create Service Account service, using OAuth2 for reading: %v\n", err)
+					readService = uploadService
+				} else {
+					fmt.Println("Using Service Account for reading files")
+				}
+			}
+		}
+	} else {
+		fmt.Println("Service Account not configured, using OAuth2 for all operations")
+		readService = uploadService // Используем OAuth2 для всего
+	}
+
+	// Определяем folder ID
+	folderID := os.Getenv("folder_id")
 	if folderID != "" {
 		fmt.Printf("Using specified folder ID: %s\n", folderID)
 	} else {
@@ -264,17 +315,82 @@ func initGoogleDrive() (*DriveManager, error) {
 		if folderName == "" {
 			folderName = "MinecraftMods"
 		}
-		var err error
-		folderID, err = createOrGetFolder(srv, folderName)
+		folderID, err = createOrGetFolder(uploadService, folderName)
 		if err != nil {
 			return nil, fmt.Errorf("unable to create/get folder: %v", err)
 		}
 	}
 
 	return &DriveManager{
-		service:  srv,
-		folderID: folderID,
+		readService:   readService,
+		uploadService: uploadService,
+		folderID:      folderID,
 	}, nil
+}
+
+func createOrGetFolder(srv *drive.Service, folderName string) (string, error) {
+	// Check if folder already exists (search in all locations, not just root)
+	query := fmt.Sprintf("name='%s' and mimeType='application/vnd.google-apps.folder' and trashed=false", folderName)
+	r, err := srv.Files.List().
+		Q(query).
+		PageSize(1000).
+		SupportsAllDrives(true).
+		IncludeItemsFromAllDrives(true).
+		Corpora("allDrives").
+		Do()
+	if err != nil {
+		return "", err
+	}
+
+	// If folders found, use the first one
+	if len(r.Files) > 0 {
+		fmt.Printf("Found existing folder: %s (ID: %s)\n", r.Files[0].Name, r.Files[0].Id)
+		return r.Files[0].Id, nil
+	}
+
+	// Create new folder only if none exists
+	fmt.Printf("Creating new folder: %s\n", folderName)
+	folder := &drive.File{
+		Name:     folderName,
+		MimeType: "application/vnd.google-apps.folder",
+	}
+
+	file, err := srv.Files.Create(folder).
+		SupportsAllDrives(true).
+		Do()
+	if err != nil {
+		return "", err
+	}
+
+	fmt.Printf("Created new folder: %s (ID: %s)\n", file.Name, file.Id)
+	return file.Id, nil
+}
+
+func (dm *DriveManager) uploadFile(fileName string, reader io.Reader) error {
+	file := &drive.File{
+		Name:    fileName,
+		Parents: []string{dm.folderID},
+	}
+
+	_, err := dm.uploadService.Files.Create(file).
+		Media(reader).
+		SupportsAllDrives(true).
+		Do()
+	return err
+}
+
+func (dm *DriveManager) listFiles() ([]*drive.File, error) {
+	r, err := dm.readService.Files.List().
+		Q(fmt.Sprintf("'%s' in parents and trashed=false", dm.folderID)).
+		SupportsAllDrives(true).
+		IncludeItemsFromAllDrives(true).
+		Corpora("allDrives").
+		Fields("files(id,name,mimeType,owners(emailAddress))").
+		Do()
+	if err != nil {
+		return nil, err
+	}
+	return r.Files, nil
 }
 
 func getClient(config *oauth2.Config) *http.Client {
@@ -323,52 +439,4 @@ func saveToken(path string, token *oauth2.Token) {
 	}
 	defer f.Close()
 	json.NewEncoder(f).Encode(token)
-}
-
-func createOrGetFolder(srv *drive.Service, folderName string) (string, error) {
-	// Check if folder already exists (search in all locations, not just root)
-	query := fmt.Sprintf("name='%s' and mimeType='application/vnd.google-apps.folder' and trashed=false", folderName)
-	r, err := srv.Files.List().Q(query).PageSize(1000).Do()
-	if err != nil {
-		return "", err
-	}
-
-	// If folders found, use the first one
-	if len(r.Files) > 0 {
-		fmt.Printf("Found existing folder: %s (ID: %s)\n", r.Files[0].Name, r.Files[0].Id)
-		return r.Files[0].Id, nil
-	}
-
-	// Create new folder only if none exists
-	fmt.Printf("Creating new folder: %s\n", folderName)
-	folder := &drive.File{
-		Name:     folderName,
-		MimeType: "application/vnd.google-apps.folder",
-	}
-
-	file, err := srv.Files.Create(folder).Do()
-	if err != nil {
-		return "", err
-	}
-
-	fmt.Printf("Created new folder: %s (ID: %s)\n", file.Name, file.Id)
-	return file.Id, nil
-}
-
-func (dm *DriveManager) uploadFile(fileName string, reader io.Reader) error {
-	file := &drive.File{
-		Name:    fileName,
-		Parents: []string{dm.folderID},
-	}
-
-	_, err := dm.service.Files.Create(file).Media(reader).Do()
-	return err
-}
-
-func (dm *DriveManager) listFiles() ([]*drive.File, error) {
-	r, err := dm.service.Files.List().Q(fmt.Sprintf("'%s' in parents", dm.folderID)).Do()
-	if err != nil {
-		return nil, err
-	}
-	return r.Files, nil
 }

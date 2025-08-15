@@ -6,7 +6,7 @@
 .env
 credentials.json
 token.json
-
+service_credentials.json
 # Compiled binaries
 gaycraftbot
 gaycraftbot.exe

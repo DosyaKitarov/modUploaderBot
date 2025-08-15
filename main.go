@@ -79,9 +79,19 @@ func main() {
 
 	fmt.Println("Bot has started!")
 
+	// Helper function to safely send messages
+	sendMessage := func(c tele.Context, text string) error {
+		// Create message options to avoid thread issues
+		opts := &tele.SendOptions{}
+
+		// Send to the chat without specifying thread
+		_, err := b.Send(&tele.Chat{ID: c.Chat().ID}, text, opts)
+		return err
+	}
+
 	// Basic start command
 	b.Handle("/start", func(c tele.Context) error {
-		return c.Send("Welcome to the Mod Uploader Bot! 🎮\n\nCommands:\n/upload - Start uploading .jar files to Google Drive (requires password)\n/done - Finish uploading session\n/list - List all uploaded mods\n/quantity - Get the number of uploaded mods\n\n🔒 Authentication required for uploading files.")
+		return sendMessage(c, "Welcome to the Mod Uploader Bot! 🎮\n\nCommands:\n/upload - Start uploading .jar files to Google Drive (requires password)\n/done - Finish uploading session\n/list - List all uploaded mods\n/quantity - Get the number of uploaded mods\n\n🔒 Authentication required for uploading files.")
 	})
 
 	// Upload command - starts upload session for .jar files
@@ -97,9 +107,9 @@ func main() {
 		}
 
 		if isFirstTimeSetup {
-			return c.Send("🔑 Please enter the upload password to continue:")
+			return sendMessage(c, "🔑 Please enter the upload password to continue:")
 		} else {
-			return c.Send("✅ Upload session started!\n\nPlease send your .jar files now. I'll upload each one to Google Drive.\n\nUse /done when you're finished uploading, or /cancel to cancel the session.")
+			return sendMessage(c, "✅ Upload session started!\n\nPlease send your .jar files now. I'll upload each one to Google Drive.\n\nUse /done when you're finished uploading, or /cancel to cancel the session.")
 		}
 	})
 
@@ -109,7 +119,7 @@ func main() {
 		session, exists := uploadSessions[chatID]
 
 		if !exists || !session.isActive {
-			return c.Send("No active upload session found. Use /upload to start uploading files.")
+			return sendMessage(c, "No active upload session found. Use /upload to start uploading files.")
 		}
 
 		// End the session
@@ -117,7 +127,7 @@ func main() {
 		delete(uploadSessions, chatID)
 
 		duration := time.Since(session.startTime)
-		return c.Send(fmt.Sprintf("✅ Upload session completed!\n\n📊 Files uploaded: %d\n⏱️ Duration: %v\n\nThank you for using the Mod Uploader Bot!", session.uploadCount, duration.Round(time.Second)))
+		return sendMessage(c, fmt.Sprintf("✅ Upload session completed!\n\n📊 Files uploaded: %d\n⏱️ Duration: %v\n\nThank you for using the Mod Uploader Bot!", session.uploadCount, duration.Round(time.Second)))
 	})
 
 	// Cancel command - cancels upload session
@@ -126,14 +136,14 @@ func main() {
 		session, exists := uploadSessions[chatID]
 
 		if !exists || !session.isActive {
-			return c.Send("No active upload session found.")
+			return sendMessage(c, "No active upload session found.")
 		}
 
 		// Cancel the session
 		session.isActive = false
 		delete(uploadSessions, chatID)
 
-		return c.Send(fmt.Sprintf("❌ Upload session cancelled.\n\n📊 Files uploaded before cancellation: %d", session.uploadCount))
+		return sendMessage(c, fmt.Sprintf("❌ Upload session cancelled.\n\n📊 Files uploaded before cancellation: %d", session.uploadCount))
 	})
 
 	// Handle document uploads
@@ -143,41 +153,41 @@ func main() {
 
 		// Check if there's an active upload session
 		if !exists || !session.isActive {
-			return c.Send("No active upload session found. Use /upload to start uploading files.")
+			return sendMessage(c, "No active upload session found. Use /upload to start uploading files.")
 		}
 
 		// Check if authenticated
 		if isFirstTimeSetup {
-			return c.Send("🔒 Please authenticate first with the password. Use /upload and enter the password.")
+			return sendMessage(c, "🔒 Please authenticate first with the password. Use /upload and enter the password.")
 		}
 
 		doc := c.Message().Document
 
 		// Check if it's a .jar file
 		if !strings.HasSuffix(doc.FileName, ".jar") {
-			return c.Send("Please send only .jar files.")
+			return sendMessage(c, "Please send only .jar files.")
 		}
 
 		// Send upload progress message
 		progressMsg := fmt.Sprintf("⏳ Uploading %s... (%d files uploaded so far)", doc.FileName, session.uploadCount)
-		c.Send(progressMsg)
+		sendMessage(c, progressMsg)
 
 		// Download the file
 		reader, err := b.File(&doc.File)
 		if err != nil {
-			return c.Send("Failed to get file reader: " + err.Error())
+			return sendMessage(c, "Failed to get file reader: "+err.Error())
 		}
 
 		// Upload to Google Drive
 		err = driveManager.uploadFile(doc.FileName, reader)
 		if err != nil {
-			return c.Send("Failed to upload to Google Drive: " + err.Error())
+			return sendMessage(c, "Failed to upload to Google Drive: "+err.Error())
 		}
 
 		// Update session count
 		session.uploadCount++
 
-		return c.Send(fmt.Sprintf("✅ Successfully uploaded %s to Google Drive!\n\n📊 Total files uploaded: %d\n\nSend more .jar files or use /done to finish.", doc.FileName, session.uploadCount))
+		return sendMessage(c, fmt.Sprintf("✅ Successfully uploaded %s to Google Drive!\n\n📊 Total files uploaded: %d\n\nSend more .jar files or use /done to finish.", doc.FileName, session.uploadCount))
 	})
 
 	// Handle text messages (for password authentication)
@@ -204,12 +214,12 @@ func main() {
 			}
 			isFirstTimeSetup = false
 
-			return c.Send("✅ UBERIIIIIIIIIIIIIIII\n\n📤 Upload session started!\n\nPlease send your .jar files now. I'll upload each one to Google Drive.\n\nUse /done when you're finished uploading, or /cancel to cancel the session.")
+			return sendMessage(c, "✅ UBERIIIIIIIIIIIIIIII\n\n📤 Upload session started!\n\nPlease send your .jar files now. I'll upload each one to Google Drive.\n\nUse /done when you're finished uploading, or /cancel to cancel the session.")
 		} else {
 			// Wrong password - end session
 			session.isActive = false
 			delete(uploadSessions, chatID)
-			return c.Send("❌ Incorrect password. Upload session cancelled.\n\nUse /upload to try again.")
+			return sendMessage(c, "❌ Incorrect password. Upload session cancelled.\n\nUse /upload to try again.")
 		}
 	})
 
@@ -217,11 +227,11 @@ func main() {
 	b.Handle("/list", func(c tele.Context) error {
 		files, err := driveManager.listFiles()
 		if err != nil {
-			return c.Send("Failed to get file list: " + err.Error())
+			return sendMessage(c, "Failed to get file list: "+err.Error())
 		}
 
 		if len(files) == 0 {
-			return c.Send("No mods uploaded yet.")
+			return sendMessage(c, "No mods uploaded yet.")
 		}
 
 		var fileList strings.Builder
@@ -230,17 +240,17 @@ func main() {
 			fileList.WriteString(fmt.Sprintf("%d. %s\n", i+1, file.Name))
 		}
 
-		return c.Send(fileList.String())
+		return sendMessage(c, fileList.String())
 	})
 
 	// Quantity command - shows number of uploaded mods
 	b.Handle("/quantity", func(c tele.Context) error {
 		files, err := driveManager.listFiles()
 		if err != nil {
-			return c.Send("Failed to get file count: " + err.Error())
+			return sendMessage(c, "Failed to get file count: "+err.Error())
 		}
 
-		return c.Send(fmt.Sprintf("📊 Total number of uploaded mods: %d", len(files)))
+		return sendMessage(c, fmt.Sprintf("📊 Total number of uploaded mods: %d", len(files)))
 	})
 
 	b.Start()

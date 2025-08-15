@@ -1,0 +1,37 @@
+# IDE settings
+.vscode/
+.idea/
+
+# Environment variables and secrets
+.env
+credentials.json
+token.json
+
+# Compiled binaries
+gaycraftbot
+gaycraftbot.exe
+*.exe
+
+# Go build artifacts
+*.o
+*.a
+*.so
+
+# Temporary files
+*.tmp
+*.log
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Go specific
+vendor/
+*.test
+*.out
+coverage.out
